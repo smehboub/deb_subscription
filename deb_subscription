@@ -1,0 +1,202 @@
+#!/usr/bin/env python
+################################
+# deb_subscription
+#
+# Version: 0.0.0.1
+# Date: 2018-12-03
+# Authors: Sophian Mehboub
+################################
+from deb_subscription_lib.models import KatelloBase, organizations, gpg_keys, products, repositories, activation_keys, content_views, EmptyException, operatingsystems, domains, hosts, architectures, locations, subscriptions, LoginException
+from deb_subscription_lib.utils import aptKeyAdd, GPGException, append, downloadFile, DownloadFileException, generate_file_from_template, getInfoFqdn
+import sys
+import os
+from docopt import docopt
+import getpass
+import sys
+import requests
+import platform
+import imp
+
+system = platform.linux_distribution()[0]
+if system not in [ 'Ubuntu', 'ubuntu', 'Debian', 'debian' ] : 
+    print("The OS isn't supported ( just OS debian like )")
+    sys.exit(1)
+
+usage = """
+Usage:
+  deb_subscription --fqdn=<f> --organization=<o> --location=<l> --activation_key=<k> [--username=<u>] [--password=<p>]
+  deb_subscription -h | --help
+Options:
+  -h --help            Show this screen.
+  --fqdn=<f>           fqdn katello
+  --organization=<o>   organization
+  --activation_key=<k> activation key
+  --location=<o>       location
+  --username=<u>       username
+  --password=<p>       password
+"""
+
+arguments = docopt(usage, version='0.0.0.1')
+
+if not arguments['--password'] or not arguments['--username']:
+    if sys.stdin.isatty():
+        print("Enter credentials")
+        username = raw_input("Username: ")
+        password = getpass.getpass("Password: ")
+    else:
+        username = sys.stdin.readline().rstrip()
+        password = sys.stdin.readline().rstrip()
+else:
+    username = arguments['--username']
+    password = arguments['--password']
+
+
+KatelloBase.fqdn = arguments['--fqdn']
+KatelloBase.username = username
+KatelloBase.password = password
+certdir = '/var/lib/apt'
+KatelloBase.cacert = '%s/katello-server-ca.crt' % certdir
+cert = 'cert.pem'
+key = 'key.pem'
+
+try:
+    try:
+        try:
+            downloadFile('https://%s/pub/katello-server-ca.crt' % KatelloBase.fqdn, KatelloBase.cacert)
+        except DownloadFileException as e:
+            print(str(e))
+            sys.exit(1)
+
+        org = arguments['--organization']
+        location_name = arguments['--location']
+        activation_key_name = arguments['--activation_key']
+
+        products_list = []
+
+        organizations = organizations()
+        organization = organizations.getByName(org)
+
+        activation_keys = activation_keys()
+        activation_keys.organization_id = organization['id']
+        activation_key = activation_keys.getByName(activation_key_name)
+
+        content_views = content_views();
+        content_view = content_views.getFullById(activation_key['content_view']['id'])
+
+        environment_name = activation_key['environment']['name']
+        content_view_name = content_view['name']
+
+        repositories = repositories()
+
+        gpg_keys = gpg_keys()
+        gpg_keys.organization_id = organization['id']
+        gnupghome='/etc/apt/trusted.gpg.d'
+        keyring = '%s/%s-%s.gpg' % (gnupghome, 'custom', KatelloBase.fqdn)
+
+        trusted=' '
+        for repository_short_description in content_view['repositories']:
+            if repository_short_description['content_type'] == 'deb':
+                repository = repositories.getFullById(repository_short_description['id'])
+                gpg_key = gpg_keys.getFullById(repository['gpg_key_id'])
+                if 'content' in gpg_key:
+                    gpg_key_content = gpg_key['content']
+                    try:
+                        aptKeyAdd(keyring=keyring, pubkey=gpg_key_content)
+                    except GPGException as e:
+                        print('GPG import error : %s' % str(e))
+                        sys.exit(1)
+                else: trusted=' [trusted=yes] '
+                releases = [x.strip() for x in repository['deb_releases'].split(',')]
+                components = " ".join([x.strip() for x in repository['deb_components'].split(',')])
+                for release in releases:
+                    entry = 'deb%shttps://%s/pulp/deb/%s/%s/%s/%s/%s/%s %s %s\n' % (trusted, KatelloBase.fqdn, org, environment_name, content_view_name, repository['product_type'], repository['product']['name'], repository['name'], release, components)
+                    custom_apt_sources_list = '/etc/apt/sources.list.d/%s-%s-%s.list' % (KatelloBase.fqdn, repository['product']['name'], repository['name'].replace('/', '_'))
+                    append(custom_apt_sources_list, entry)
+                    if repository['product']['name'] not in products_list:
+                            products_list.append(repository['product']['name'])
+
+        organizations.org = org
+        organizations.getCerts()
+        organizations.writeCert('%s/%s' % (certdir, cert))
+        organizations.writeKey('%s/%s' % (certdir, key))
+
+        apt_conf_vars = {'fqdn' : KatelloBase.fqdn, 'cacert' : KatelloBase.cacert, 'cert' : '%s/%s' % (certdir, cert), 'key' : '%s/%s' % (certdir, key)}
+        apt_conf_template_dir = imp.find_module("deb_subscription_lib")[1]
+        apt_conf_template = '%s/templates/custom-apt-conf.j2' % apt_conf_template_dir
+        apt_conf_file = '/etc/apt/apt.conf.d/custom-katello-capensis-fr'
+        generate_file_from_template(apt_conf_vars, apt_conf_template, apt_conf_file)
+
+        architectures = architectures()
+        try:
+            architecture = architectures.create()
+        except EmptyException as e:
+            print(str(e))
+            sys.exit(1)
+
+        operatingsystems = operatingsystems()
+        try:
+            operatingsystem = operatingsystems.create()
+        except EmptyException as e:
+            print(str(e))
+            sys.exit(1)
+
+        hosts = hosts()
+
+        locations = locations()
+        locations.name = location_name
+        try:
+            location = locations.create()
+        except EmptyException as e:
+            print(str(e))
+            sys.exit(1)
+
+        domains = domains()
+        domains.organization_id = organization['id']
+        domains.location_id = location['id']
+        try:
+            domain = domains.create()
+        except EmptyException as e:
+            print(str(e))
+            sys.exit(1)
+
+        hosts.location_id = location['id']
+        hosts.operatingsystem_id = operatingsystem['id']
+        hosts.organization_id = organization['id']
+        hosts.architecture_id = architecture['id']
+        hosts.domain_id = domain['id']
+
+        if activation_key_name is not None and activation_key_name != '':
+            hosts.lifecycle_environment_id = activation_key['environment']['id']
+            hosts.content_view_id = activation_key['content_view']['id']
+
+        try:
+            host = hosts.create()
+        except EmptyException as e:
+            print(str(e))
+            sys.exit(1)
+
+        subscriptions = subscriptions()
+        if activation_key_name is not None and activation_key_name != '':
+            subscriptions.lifecycle_environment_id = activation_key['environment']['id']
+            subscriptions.content_view_id = activation_key['content_view']['id']
+        try:
+            subscriptions.create()
+        except EmptyException as e:
+            print(str(e))
+            sys.exit(1)
+
+        subscriptions.host_id = host['id']
+
+        subscriptions.products_ids = []
+        products = products()
+        for product_name in products_list:
+            subscription = subscriptions.getByName(product_name)
+            subscriptions.products_ids.append({ "id" : subscription['id'] })
+
+        subscriptions.add_subscriptions()
+
+        print('The system has been registred to katello')
+    except LoginException as e:
+        print(str(e))
+except requests.exceptions.ConnectionError as e:
+    print('The katello server is unreachable')
