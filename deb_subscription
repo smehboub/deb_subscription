@@ -109,7 +109,8 @@ try:
                 releases = [x.strip() for x in repository['deb_releases'].split(',')]
                 components = " ".join([x.strip() for x in repository['deb_components'].split(',')])
                 for release in releases:
-                    entry = 'deb%shttps://%s/pulp/deb/%s/%s/%s/%s/%s/%s %s %s\n' % (trusted, KatelloBase.fqdn, org, environment_name, content_view_name, repository['product_type'], repository['product']['name'], repository['name'], release, components)
+                    product_type = repository['product_type'] if 'product_type' in repository else 'custom'
+                    entry = 'deb%shttps://%s/pulp/deb/%s/%s/%s/%s/%s/%s %s %s\n' % (trusted, KatelloBase.fqdn, org, environment_name, content_view_name, product_type, repository['product']['name'], repository['name'], release, components)
                     custom_apt_sources_list = '/etc/apt/sources.list.d/%s-%s-%s.list' % (KatelloBase.fqdn, repository['product']['name'], repository['name'].replace('/', '_'))
                     append(custom_apt_sources_list, entry)
                     if repository['product']['name'] not in products_list:
